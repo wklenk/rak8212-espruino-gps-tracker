@@ -17,9 +17,31 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+var ledBlinkingInterval = -1;
+var ledBlinkState;
+
 var at;
 var timeoutId;
-var waypoints = [];
+var track = {};
+var stopTracking = false;
+
+track.logIndex = 0;
+track.latitude = new Float32Array(1000);
+track.longitude = new Float32Array(1000);
+track.elevation = new Float32Array(1000);
+track.time = [];
+
+// Format the track to plain-text file (suitable for input in GPS Visualizer)
+function formatTrackToPlainText() {
+  stopTracking = true;
+  clearTimeout(timeoutId);
+
+  console.log('trackpoint,time,latitude,longitude,alt');
+  var i;
+  for (i = 0; i < track.logIndex; i++) {
+    console.log(i + 1, ',', track.time[i], ',', track.latitude[i], ',', track.longitude[i], ',', track.elevation[i]);
+  }
+}
 
 // Returns a promise for a given AT command that is sent to the BG96 module
 function sendAtCommand(command, timeoutMs) {
@@ -41,28 +63,38 @@ function sendAtCommand(command, timeoutMs) {
 function getLocation() {
   sendAtCommand('AT+QGPSLOC=2') // Obtain positioning information.
     .then(function onFulfilled(rv) {
-      console.log(rv);
+      if (ledBlinkingInterval >= 0) {
+        clearInterval(ledBlinkingInterval);
+        ledBlinkingInterval = -1;
+      }
+
+      // console.log(rv);
 
       var parameters = rv.substr(10).split(',');
-      var waypoint = {};
 
-      waypoint.latitude = parseFloat(parameters[1]);
-      waypoint.longitude = parseFloat(parameters[2]);
-      waypoint.elevation = parseFloat(parameters[4]);
+      track.latitude[track.logIndex] = parseFloat(parameters[1]);
+      track.longitude[track.logIndex] = parseFloat(parameters[2]);
+      track.elevation[track.logIndex] = parseFloat(parameters[4]);
 
-      var date = parameters[9];
       var time = parameters[0];
+      track.time[track.logIndex] = time.substr(0, 2) + ":" + time.substr(2, 2) + ":" + time.substr(4, 2);
 
-      waypoint.time = "20" + date.substr(4, 2) + "-" + date.substr(2, 2) + "-" + date.substr(0, 2)
-        + "T" + time.substr(0, 2) + ":" + time.substr(2, 2) + ":" + time.substr(4, 2) + "Z";
+      track.logIndex++;
+      track.logIndex = track.logIndex % track.latitude.length;
 
-      console.log(waypoint);
-      waypoints.push(waypoint);
-
-      timeoutId = setTimeout(getLocation, 10000);
+      if (!stopTracking) {
+        timeoutId = setTimeout(getLocation, 10000);
+      }
     }, function onRejected(rv) {
-      console.log('Error:', rv);
-      timeoutId = setTimeout(getLocation, 10000);
+      // console.log('Error:', rv);
+
+      if (ledBlinkingInterval < 0) {
+        ledBlinkingInterval = setInterval("digitalWrite(LED1,ledBlinkState = !ledBlinkState);", 500);
+      }
+
+      if (!stopTracking) {
+        timeoutId = setTimeout(getLocation, 10000);
+      }
     });
 
   return new Promise(function (resolve, reject) {
@@ -70,39 +102,36 @@ function getLocation() {
   });
 }
 
-console.log("Connecting BG96 module ...");
-require("iTracker").setCellOn(true, function (usart) {
-  console.log("BG96 module connected.");
-  at = require("AT").connect(usart);
-  // at.debug(true); // Show request and response messages of modem
+// Main function. Start to read GPS positions and store to internal data structure.
+function startTracking() {
+  // console.log("Connecting BG96 module ...");
+  require("iTracker").setCellOn(true, function (usart) {
+    // console.log("BG96 module connected.");
+    at = require("AT").connect(usart);
+    // at.debug(true); // Show request and response messages of modem
 
-  sendAtCommand('ATE0') // Turn echo off. Makes evaluation of modem responses easier.
-    .then(function (rv) {
-      return sendAtCommand('AT+GMR');
-    })
-    .then(function (rv) {
-      console.log('BG96 version: ', rv);
-      return sendAtCommand('AT+QGPS=1'); // Turn on GNSS
-    })
-    .then(function (rv) {
-      console.log(rv);
-      return sendAtCommand('AT+QGPSCFG="gnssconfig"'); // Get GNSS constellation
-    })
-    .then(function (rv) {
-      console.log(rv);
-      getLocation();
-    });
+    sendAtCommand('ATE0') // Turn echo off. Makes evaluation of modem responses easier.
+      .then(function (rv) {
+        return sendAtCommand('AT+GMR');
+      })
+      .then(function (rv) {
+        // console.log('BG96 version: ', rv);
+        return sendAtCommand('AT+QGPS=1'); // Turn on GNSS
+      })
+      .then(function (rv) {
+        // console.log(rv);
+        return sendAtCommand('AT+QGPSCFG="gnssconfig"'); // Get GNSS constellation
+      })
+      .then(function (rv) {
+        // console.log(rv);
+        getLocation();
+      });
 
-  /*
-  .then(function(rv) {
-    return sendAtCommand('AT+QGPSEND'); // Turn off GNSS
-  })
-  .then(function(rv) {
-    console.log(rv);
   });
-  */
-});
+}
+
 
 function onInit() {
   Bluetooth.setConsole(true); // Don't want to have console on "Serial1" that is used for modem.
+  startTracking();
 }
